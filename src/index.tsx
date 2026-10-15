@@ -1,13 +1,16 @@
 /** @jsxImportSource @opentui/solid */
 /**
- * TUI rendering layer. Registers the `session_prompt_right` slot, wires events
- * through `createMeterController`, and renders one reactive line from the
- * store's snapshot. All measurement lives in `meter.ts`.
+ * TUI rendering layer (OpenCode V1). Registers the `session_prompt_right` slot,
+ * wires V1 events through the transport-agnostic `wireV1` adapter, and renders
+ * one reactive line from the store's snapshot. All measurement lives in
+ * `meter.ts`.
  */
 import type { TuiPlugin, TuiPluginApi, TuiPluginModule, TuiThemeCurrent } from "@opencode-ai/plugin/tui"
+import type { RGBA } from "@opentui/core"
 import { Show, createMemo, createSignal } from "solid-js"
-import { createMeterController } from "./controller.ts"
+import { createMeterController, type MeterController } from "./controller.ts"
 import { formatLine, hasData, rateTier, type Tier, type VuScale } from "./meter.ts"
+import { wireV1 } from "./v1.ts"
 
 export type TpsMeterOptions = {
   enabled?: boolean
@@ -55,26 +58,39 @@ const DEFAULTS = {
 
 type ResolvedOptions = typeof DEFAULTS
 
-function tierColor(tier: Tier, theme: TuiThemeCurrent) {
+/** The four colors the meter renders with. */
+type Palette = { slow: RGBA; medium: RGBA; fast: RGBA; idle: RGBA }
+
+function resolveOptions(raw: unknown): ResolvedOptions {
+  return { ...DEFAULTS, ...((raw ?? {}) as Partial<ResolvedOptions>) }
+}
+
+/** V1 exposes flat semantic colors on the current theme. */
+function v1Palette(theme: TuiThemeCurrent): Palette {
+  return { slow: theme.error, medium: theme.warning, fast: theme.success, idle: theme.textMuted }
+}
+
+function tierColor(tier: Tier, palette: Palette): RGBA {
   switch (tier) {
     case "slow":
-      return theme.error
+      return palette.slow
     case "medium":
-      return theme.warning
+      return palette.medium
     case "fast":
-      return theme.success
+      return palette.fast
     default:
-      return theme.textMuted
+      return palette.idle
   }
 }
 
+/** One reactive meter line. */
 function MeterLine(props: {
-  api: TuiPluginApi
   sessionID: string
-  store: ReturnType<typeof createMeterController>["store"]
+  store: MeterController["store"]
   rev: () => number
   beat: () => number
   options: ResolvedOptions
+  palette: () => Palette
 }) {
   const snapshot = createMemo(() => {
     props.rev()
@@ -96,9 +112,9 @@ function MeterLine(props: {
 
   const color = createMemo(() => {
     const state = snapshot()
-    const theme = props.api.theme.current
-    if (!state) return theme.textMuted
-    return tierColor(rateTier(state.rate, props.options.slowTps, props.options.fastTps), theme)
+    const palette = props.palette()
+    if (!state) return palette.idle
+    return tierColor(rateTier(state.rate, props.options.slowTps, props.options.fastTps), palette)
   })
 
   return (
@@ -108,32 +124,37 @@ function MeterLine(props: {
   )
 }
 
+/** V1: `tui(api, options)`. Disposal goes through `api.lifecycle`. */
 const tui: TuiPlugin = async (api, rawOptions) => {
-  const options: ResolvedOptions = { ...DEFAULTS, ...((rawOptions ?? {}) as Partial<ResolvedOptions>) }
+  const options = resolveOptions(rawOptions)
   if (!options.enabled) return
 
   const [rev, setRev] = createSignal(0)
   const [beat, setBeat] = createSignal(0)
-  const controller = createMeterController(api, options, () => setRev((n) => n + 1))
+  const controller = createMeterController(options)
+  const unwire = wireV1(api, controller, () => setRev((n) => n + 1))
 
   const timer = setInterval(() => {
     controller.tick()
     setBeat((n) => n + 1)
   }, 1000)
 
-  api.lifecycle.onDispose(() => clearInterval(timer))
+  api.lifecycle.onDispose(() => {
+    clearInterval(timer)
+    unwire()
+  })
 
   api.slots.register({
     slots: {
       session_prompt_right(_ctx, props) {
         return (
           <MeterLine
-            api={api}
             sessionID={props.session_id}
             store={controller.store}
             rev={rev}
             beat={beat}
             options={options}
+            palette={() => v1Palette(api.theme.current)}
           />
         )
       },
@@ -141,4 +162,4 @@ const tui: TuiPlugin = async (api, rawOptions) => {
   })
 }
 
-export default { id: "tps-meter", tui } satisfies TuiPluginModule
+export default { id: "opencode-token-metrics", tui } satisfies TuiPluginModule

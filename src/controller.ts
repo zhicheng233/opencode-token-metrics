@@ -1,74 +1,49 @@
 /**
- * Translates OpenCode TUI events into calls on the `MeterStore`. Kept free of
- * JSX so it can be exercised with a fake event bus in tests; the rendering layer
- * only reads `store.snapshot()`.
+ * Platform-agnostic meter controller. Version-specific adapters (`v1.ts` for
+ * OpenCode V1, `v2.ts` for OpenCode V2) translate their event buses into
+ * normalized `MeterEvent`s and feed them here. Kept free of TUI and plugin
+ * imports so it can be exercised with plain objects in tests.
  */
-import type { TuiPluginApi } from "@opencode-ai/plugin/tui"
 import { MeterStore, type RateConfig } from "./meter.ts"
 
-export type MeterApi = Pick<TuiPluginApi, "event" | "state" | "lifecycle">
+/** A normalized input to the meter, independent of OpenCode's event shape. */
+export type MeterEvent =
+  | { kind: "turn"; sessionID: string; messageID: string; at: number }
+  | { kind: "delta"; sessionID: string; messageID?: string; text: string; at: number }
+  | { kind: "segment"; sessionID: string }
+  | { kind: "done"; sessionID: string; at: number; exactTokens?: number }
+  | { kind: "drop"; sessionID: string }
 
 export type MeterController = {
   store: MeterStore
+  /** Apply one event. Returns whether it changed meter state. */
+  handle: (event: MeterEvent) => boolean
   tick: (now?: number) => void
-  dispose: () => void
 }
 
-/** Delta fields that represent generated output. Everything else is ignored. */
-const COUNTED_FIELDS = new Set(["text", "reasoning"])
-
-export function createMeterController(
-  api: MeterApi,
-  config: RateConfig,
-  onChange: () => void,
-): MeterController {
+export function createMeterController(config: RateConfig): MeterController {
   const store = new MeterStore(config)
 
-  const offDelta = api.event.on("message.part.delta", (event) => {
-    const { sessionID, messageID, field, delta } = event.properties
-    if (!sessionID || !delta) return
-    if (!COUNTED_FIELDS.has(field)) return
-    if (api.state.session.status(sessionID)?.type === "idle") return
-    store.record(sessionID, delta, Date.now(), messageID)
-    onChange()
-  })
-
-  const offUpdated = api.event.on("message.updated", (event) => {
-    const info = event.properties.info
-    if (info.role !== "assistant") return
-    if (info.time.completed) {
-      const exact = info.tokens.output + info.tokens.reasoning
-      if (store.settle(info.sessionID, exact, Date.now())) onChange()
-      return
+  const handle = (event: MeterEvent): boolean => {
+    switch (event.kind) {
+      case "turn":
+        store.beginTurn(event.sessionID, event.messageID, event.at)
+        return true
+      case "delta":
+        store.record(event.sessionID, event.text, event.at, event.messageID)
+        return true
+      case "segment":
+        return store.newSegment(event.sessionID)
+      case "done":
+        return store.settle(event.sessionID, event.exactTokens, event.at)
+      case "drop":
+        return store.drop(event.sessionID)
     }
-    store.beginTurn(info.sessionID, info.id, info.time.created)
-    onChange()
-  })
-
-  const offPart = api.event.on("message.part.updated", (event) => {
-    if (event.properties.part.type !== "tool") return
-    if (store.newSegment(event.properties.sessionID)) onChange()
-  })
-
-  const offDeleted = api.event.on("session.deleted", (event) => {
-    if (store.drop(event.properties.sessionID)) onChange()
-  })
-
-  const dispose = () => {
-    offDelta()
-    offUpdated()
-    offPart()
-    offDeleted()
   }
-
-  api.lifecycle.onDispose(dispose)
 
   return {
     store,
-    dispose,
-    tick: (now: number = Date.now()) => {
-      store.prune(now)
-      onChange()
-    },
+    handle,
+    tick: (now: number = Date.now()) => store.prune(now),
   }
 }
