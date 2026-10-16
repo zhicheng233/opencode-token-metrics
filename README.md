@@ -2,7 +2,7 @@
 
 [![npm version](https://img.shields.io/npm/v/opencode-token-metrics)](https://www.npmjs.com/package/opencode-token-metrics)
 
-A live throughput meter for the [OpenCode](https://opencode.ai) TUI. It renders to the right of the session prompt as a VU-style time-series of generation speed, with average, peak, trend, and time-to-first-token.
+A live throughput meter for the [OpenCode](https://opencode.ai) TUI, for **V1 and V2**. It renders beside the session prompt as a VU-style time-series of generation speed, with average, peak, trend, and time-to-first-token.
 
 ```
 tok/s ▃▆▇▇█▆▄ 42.0 ▲15% · avg 38.2 · pk 45.0 · ttft 0.8s
@@ -21,6 +21,7 @@ tok/s ▃▆▇▇█ 45.0 ▲18% · avg 41.2 · pk 45.0 · ttft 0.8s
 tok/s ▃▆▇▇█▆▄ - · avg 41.2 · pk 45.0 · ttft 0.8s         tool call — average holds
 tok/s ▃▆▇▇█▆▄█▆ 43.0 ▲2% · avg 41.0 · pk 45.0 · ttft 0.8s   resumed
 tok/s ▃▆▇▇█▆▄█▆ 43.0 · avg 41.0 · pk 45.0 · ttft 0.8s        holds, scaled to exact tokens
+tok/s ▁▃▅ 36.0 ▲9% · avg 41.0 · pk 45.0 · ttft 0.6s · cache 87%   cache hit on a long prompt
 tok/s idle                                               nothing running
 ```
 
@@ -33,18 +34,49 @@ The rate and trend are color-coded: red below `slowTps`, yellow up to `fastTps`,
 - **Peak hold** — the fastest rate observed during the turn, never below the average
 - **Trend** — up/down against the previous second, with percent
 - **TTFT** — time from the assistant message being created to the first streamed token
+- **Cache hit** — the share of the prompt served from the provider's prompt cache, once the provider reports it
 
-## Install (humans)
+## Install
 
-One command:
+One package serves both OpenCode generations and the TUI picks the matching
+entrypoint, so install it the way your OpenCode version expects.
+
+### V2 (2.x)
+
+Add it to the `plugins` array in your OpenCode config
+(`~/.config/opencode/opencode.jsonc` or `opencode.json`):
+
+```jsonc
+{
+  "plugins": ["opencode-token-metrics"]
+}
+```
+
+To pass options, put the plugin in **`cli.json`** instead, using the object form:
+
+```jsonc
+// ~/.config/opencode/cli.json
+{
+  "plugins": [
+    { "package": "opencode-token-metrics", "options": { "vuColumns": 20, "vuScale": "fixed", "vuFullTps": 80 } }
+  ]
+}
+```
+
+`cli.json` is the CLI-side config, so options there reach the TUI plugin's
+`ctx.options`. Options written in `opencode.json` are delivered to **server**
+plugins and do not reach the TUI. Keep an entry in only one of the two files to
+avoid loading the plugin twice.
+
+The meter renders into the prompt footer status slot. Restart the TUI afterwards — watched config directories reload automatically, but changes to the plugin source itself may not take effect until a restart.
+
+### V1 (1.x)
 
 ```bash
 opencode plugin opencode-token-metrics -g
 ```
 
-This installs the package from npm and adds it to `~/.config/opencode/tui.json`. TUI plugins belong in `tui.json`, **not** `opencode.json`. Restart the TUI afterwards — plugins load at startup and are not hot-reloaded.
-
-The package ships TypeScript source and is transpiled by OpenCode's own runtime, so there is no separate build step.
+This installs the package from npm and adds it to `~/.config/opencode/tui.json`. TUI plugins belong in `tui.json`, **not** `opencode.json`.
 
 Manual setup:
 
@@ -55,7 +87,7 @@ Manual setup:
 }
 ```
 
-Add options by using the tuple form:
+V1 options use the tuple form:
 
 ```jsonc
 {
@@ -65,36 +97,55 @@ Add options by using the tuple form:
 }
 ```
 
+The package ships TypeScript source and is transpiled by OpenCode's own runtime, so there is no separate build step.
+
 ## Install (for AI agents)
 
-If you are an agent installing this for a user, the full procedure is:
+If you are an agent installing this for a user, first tell the OpenCode
+generation apart, then follow the matching procedure.
 
 ```text
 GOAL: install opencode-token-metrics into the user's OpenCode TUI.
 
+Detect the generation (from `opencode --version` or the config layout):
+  - V2 (2.x): plugins are listed under "plugins" in opencode.json / opencode.jsonc.
+  - V1 (1.x): TUI plugins are listed under "plugin" in tui.json.
+
+V2:
+1. Add "opencode-token-metrics" to the "plugins" array in the user's OpenCode
+   config (opencode.json or opencode.jsonc). Do NOT remove sibling entries.
+   Do NOT add a version suffix.
+2. Options only reach the TUI plugin when the entry lives in cli.json
+   (~/.config/opencode/cli.json) instead, in the object form:
+   { "package": "opencode-token-metrics", "options": { "alwaysShow": true } }.
+   Options in opencode.json go to server plugins and are ignored by the TUI.
+   Do not list the plugin in both files.
+
+V1:
 1. Run: opencode plugin opencode-token-metrics -g
 2. This installs the npm package and adds "opencode-token-metrics" to the
    "plugin" array in ~/.config/opencode/tui.json.
 3. If the installer is unavailable, add "opencode-token-metrics" to that
    "plugin" array by hand. Do NOT remove sibling entries. Do NOT add a version suffix.
 4. TUI plugins go in tui.json, never opencode.json.
-5. Tell the user to restart the TUI. Plugins load at startup; there is no hot reload.
-6. Do not touch any other top-level key in tui.json.
 
-Optionally pass options with the tuple form:
-["opencode-token-metrics", { "alwaysShow": true }]
+Both:
+- Do not touch any other top-level key in the config.
+- Tell the user to restart the TUI so the new plugin is loaded.
 ```
 
 ## Options
 
-Pass options as the second element of the plugin tuple:
+V1 passes options as the second element of the plugin tuple; V2 uses
+`{ "package": "opencode-token-metrics", "options": { ... } }` in `cli.json`.
+The keys are the same either way:
 
 ```jsonc
-{
-  "plugin": [
-    ["opencode-token-metrics", { "vuColumns": 20, "showTtft": false }]
-  ]
-}
+// V1 (tui.json)
+{ "plugin": [["opencode-token-metrics", { "vuColumns": 20, "showTtft": false }]] }
+
+// V2 (~/.config/opencode/cli.json)
+{ "plugins": [{ "package": "opencode-token-metrics", "options": { "vuColumns": 20, "showTtft": false } }] }
 ```
 
 | Option | Default | Description |
@@ -113,6 +164,7 @@ Pass options as the second element of the plugin tuple:
 | `showAvg` | `true` | Show the turn average |
 | `showPeak` | `true` | Show the peak |
 | `showTtft` | `true` | Show time to first token |
+| `showCache` | `true` | Show the prompt-cache hit rate once the provider reports it |
 | `showTokenCount` | `false` | Show the token counter |
 | `showElapsed` | `false` | Show elapsed turn time |
 | `alwaysShow` | `false` | Keep the meter visible when idle instead of hiding it |
@@ -121,14 +173,28 @@ Pass options as the second element of the plugin tuple:
 
 ## How it works
 
-The plugin subscribes to the TUI event bus:
+All measurement lives in `src/meter.ts`. `src/controller.ts` is a
+version-agnostic core, and a thin adapter per generation translates that
+generation's event bus into the same normalized events.
 
-- `message.updated` — on an assistant message being created, opens a turn and records its start time (for TTFT). On completion, swaps the estimate for the provider's exact `tokens.output + tokens.reasoning`, freezes the final frame, and keeps it on screen.
+**OpenCode V1** (`src/v1.ts`, installed via `tui.json`, renders in `session_prompt_right`):
+
+- `message.updated` — on an assistant message being created, opens a turn and records its start time (for TTFT). On completion, swaps the estimate for the provider's exact `tokens.output + tokens.reasoning`, reads the prompt-cache counters, freezes the final frame, and keeps it on screen.
 - `message.part.delta` — records streamed `text` and `reasoning` chunks and buckets them per second.
 - `message.part.updated` — restarts the live rate when a tool part runs, while keeping the graph continuous across the gap.
 - `session.deleted` — frees that session's meter.
 
-The live rate is `tokens in window / elapsed span` over the trailing window, measured on the wall clock. The average is `turn tokens / active generation time` — the time spent streaming, excluding tool pauses. Peak is the highest one-second rate seen during the turn (never below the average); trend compares the last two complete seconds. VU columns auto-scale to the largest bucket in view, scaled to the provider's exact token total when the turn completes.
+**OpenCode V2** (`src/v2.ts`, installed via `plugins`, renders in `prompt.footer.status`):
+
+- `session.step.started` — opens the assistant turn and records its start time (for TTFT).
+- `session.text.delta` / `session.reasoning.delta` — record streamed output and bucket it per second.
+- `session.tool.called` — restarts the live rate when a tool runs, keeping the graph continuous across the gap.
+- `session.step.ended` / `session.step.failed` — accumulate the provider's exact token usage per step, including prompt-cache reads and writes.
+- `session.execution.succeeded` / `.failed` / `.interrupted` — finish the turn with the summed tokens and cache hit rate, and freeze the final frame.
+- `session.compaction.started` / `.delta` / `.ended` / `.failed` — compaction is billed as a generation of its own: it opens a turn, streams its summary, and settles with its own reported tokens and cache usage.
+- `session.deleted` — frees that session's meter.
+
+The live rate is `tokens in window / elapsed span` over the trailing window, measured on the wall clock. The average is `turn tokens / active generation time` — the time spent streaming, excluding tool pauses. Peak is the highest one-second rate seen during the turn (never below the average); trend compares the last two complete seconds. VU columns auto-scale to the largest bucket in view, scaled to the provider's exact token total when the turn completes. The cache hit rate is `cache.read / (input + cache.read + cache.write)` — the share of prompt tokens the provider served from its prompt cache, shown only when the provider reports the counters. It clears when the next turn starts generating.
 
 ## License
 
