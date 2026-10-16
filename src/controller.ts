@@ -4,14 +4,14 @@
  * normalized `MeterEvent`s and feed them here. Kept free of TUI and plugin
  * imports so it can be exercised with plain objects in tests.
  */
-import { MeterStore, type RateConfig } from "./meter.ts"
+import { MeterStore, type CacheStats, type RateConfig } from "./meter.ts"
 
 /** A normalized input to the meter, independent of OpenCode's event shape. */
 export type MeterEvent =
   | { kind: "turn"; sessionID: string; messageID: string; at: number }
   | { kind: "delta"; sessionID: string; messageID?: string; text: string; at: number }
   | { kind: "segment"; sessionID: string }
-  | { kind: "done"; sessionID: string; at: number; exactTokens?: number }
+  | { kind: "done"; sessionID: string; at: number; exactTokens?: number; cache?: CacheStats }
   | { kind: "drop"; sessionID: string }
 
 export type MeterController = {
@@ -35,7 +35,7 @@ export function createMeterController(config: RateConfig): MeterController {
       case "segment":
         return store.newSegment(event.sessionID)
       case "done":
-        return store.settle(event.sessionID, event.exactTokens, event.at)
+        return store.settle(event.sessionID, event.exactTokens, event.at, event.cache)
       case "drop":
         return store.drop(event.sessionID)
     }

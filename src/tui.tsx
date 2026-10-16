@@ -34,6 +34,7 @@ export type TpsMeterOptions = {
   showAvg?: boolean
   showPeak?: boolean
   showTtft?: boolean
+  showCache?: boolean
   showTokenCount?: boolean
   showElapsed?: boolean
   alwaysShow?: boolean
@@ -56,6 +57,7 @@ const DEFAULTS = {
   showAvg: true,
   showPeak: true,
   showTtft: true,
+  showCache: true,
   showTokenCount: false,
   showElapsed: false,
   alwaysShow: false,

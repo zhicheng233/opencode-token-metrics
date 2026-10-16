@@ -21,6 +21,7 @@ tok/s ▃▆▇▇█ 45.0 ▲18% · avg 41.2 · pk 45.0 · ttft 0.8s
 tok/s ▃▆▇▇█▆▄ - · avg 41.2 · pk 45.0 · ttft 0.8s         tool call — average holds
 tok/s ▃▆▇▇█▆▄█▆ 43.0 ▲2% · avg 41.0 · pk 45.0 · ttft 0.8s   resumed
 tok/s ▃▆▇▇█▆▄█▆ 43.0 · avg 41.0 · pk 45.0 · ttft 0.8s        holds, scaled to exact tokens
+tok/s ▁▃▅ 36.0 ▲9% · avg 41.0 · pk 45.0 · ttft 0.6s · cache 87%   cache hit on a long prompt
 tok/s idle                                               nothing running
 ```
 
@@ -33,6 +34,7 @@ The rate and trend are color-coded: red below `slowTps`, yellow up to `fastTps`,
 - **Peak hold** — the fastest rate observed during the turn, never below the average
 - **Trend** — up/down against the previous second, with percent
 - **TTFT** — time from the assistant message being created to the first streamed token
+- **Cache hit** — the share of the prompt served from the provider's prompt cache, once the provider reports it
 
 ## Install
 
@@ -162,6 +164,7 @@ The keys are the same either way:
 | `showAvg` | `true` | Show the turn average |
 | `showPeak` | `true` | Show the peak |
 | `showTtft` | `true` | Show time to first token |
+| `showCache` | `true` | Show the prompt-cache hit rate once the provider reports it |
 | `showTokenCount` | `false` | Show the token counter |
 | `showElapsed` | `false` | Show elapsed turn time |
 | `alwaysShow` | `false` | Keep the meter visible when idle instead of hiding it |
@@ -176,7 +179,7 @@ generation's event bus into the same normalized events.
 
 **OpenCode V1** (`src/v1.ts`, installed via `tui.json`, renders in `session_prompt_right`):
 
-- `message.updated` — on an assistant message being created, opens a turn and records its start time (for TTFT). On completion, swaps the estimate for the provider's exact `tokens.output + tokens.reasoning`, freezes the final frame, and keeps it on screen.
+- `message.updated` — on an assistant message being created, opens a turn and records its start time (for TTFT). On completion, swaps the estimate for the provider's exact `tokens.output + tokens.reasoning`, reads the prompt-cache counters, freezes the final frame, and keeps it on screen.
 - `message.part.delta` — records streamed `text` and `reasoning` chunks and buckets them per second.
 - `message.part.updated` — restarts the live rate when a tool part runs, while keeping the graph continuous across the gap.
 - `session.deleted` — frees that session's meter.
@@ -186,12 +189,12 @@ generation's event bus into the same normalized events.
 - `session.step.started` — opens the assistant turn and records its start time (for TTFT).
 - `session.text.delta` / `session.reasoning.delta` — record streamed output and bucket it per second.
 - `session.tool.called` — restarts the live rate when a tool runs, keeping the graph continuous across the gap.
-- `session.step.ended` / `session.step.failed` — accumulate the provider's exact token usage per step.
-- `session.execution.succeeded` / `.failed` / `.interrupted` — finish the turn with the summed tokens and freeze the final frame.
-- `session.compaction.started` / `.delta` / `.ended` / `.failed` — compaction is billed as a generation of its own: it opens a turn, streams its summary, and settles with its own reported tokens.
+- `session.step.ended` / `session.step.failed` — accumulate the provider's exact token usage per step, including prompt-cache reads and writes.
+- `session.execution.succeeded` / `.failed` / `.interrupted` — finish the turn with the summed tokens and cache hit rate, and freeze the final frame.
+- `session.compaction.started` / `.delta` / `.ended` / `.failed` — compaction is billed as a generation of its own: it opens a turn, streams its summary, and settles with its own reported tokens and cache usage.
 - `session.deleted` — frees that session's meter.
 
-The live rate is `tokens in window / elapsed span` over the trailing window, measured on the wall clock. The average is `turn tokens / active generation time` — the time spent streaming, excluding tool pauses. Peak is the highest one-second rate seen during the turn (never below the average); trend compares the last two complete seconds. VU columns auto-scale to the largest bucket in view, scaled to the provider's exact token total when the turn completes.
+The live rate is `tokens in window / elapsed span` over the trailing window, measured on the wall clock. The average is `turn tokens / active generation time` — the time spent streaming, excluding tool pauses. Peak is the highest one-second rate seen during the turn (never below the average); trend compares the last two complete seconds. VU columns auto-scale to the largest bucket in view, scaled to the provider's exact token total when the turn completes. The cache hit rate is `cache.read / (input + cache.read + cache.write)` — the share of prompt tokens the provider served from its prompt cache, shown only when the provider reports the counters. It clears when the next turn starts generating.
 
 ## License
 

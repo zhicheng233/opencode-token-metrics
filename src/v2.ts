@@ -18,16 +18,25 @@
  */
 import type { Context } from "@opencode/plugin/tui/context"
 import type { MeterController, MeterEvent } from "./controller.ts"
+import { cacheHitRate } from "./meter.ts"
 
-/** The subset of a step's token usage that counts as generated output. */
-type StepTokens = { readonly output: number; readonly reasoning: number }
+/** The slice of a step's provider-reported usage the meter consumes. */
+type StepTokens = {
+  readonly input: number
+  readonly output: number
+  readonly reasoning: number
+  readonly cache: { readonly read: number; readonly write: number }
+}
+
+/** Running provider-reported usage for one session's execution. */
+type Usage = { output: number; input: number; cacheRead: number; cacheWrite: number }
 
 /**
  * Wire V2 session events into the controller. Returns an unsubscribe function
  * that `setup` hands back to OpenCode for disposal.
  */
 export function wireV2(ctx: Context, controller: MeterController, onChange: () => void): () => void {
-  const exact = new Map<string, number>()
+  const exact = new Map<string, Usage>()
   const compacting = new Set<string>()
   const offs: Array<() => void> = []
 
@@ -39,16 +48,33 @@ export function wireV2(ctx: Context, controller: MeterController, onChange: () =
   // so totals are summed and settled when the execution ends.
   const addUsage = (sessionID: string, tokens: StepTokens | undefined) => {
     if (!tokens) return
-    exact.set(sessionID, (exact.get(sessionID) ?? 0) + tokens.output + tokens.reasoning)
+    const usage = exact.get(sessionID) ?? { output: 0, input: 0, cacheRead: 0, cacheWrite: 0 }
+    usage.output += tokens.output + tokens.reasoning
+    usage.input += tokens.input
+    usage.cacheRead += tokens.cache.read
+    usage.cacheWrite += tokens.cache.write
+    exact.set(sessionID, usage)
+  }
+
+  /** Turn accumulated usage into a settle payload, or an empty one. */
+  const settleWith = (sessionID: string, usage: Usage | undefined): MeterEvent => {
+    if (!usage) return { kind: "done", sessionID, at: Date.now() }
+    return {
+      kind: "done",
+      sessionID,
+      at: Date.now(),
+      exactTokens: usage.output > 0 ? usage.output : undefined,
+      cache: cacheHitRate(usage.input, usage.cacheRead, usage.cacheWrite),
+    }
   }
 
   const finish = (sessionID: string) => {
     // A compaction in flight owns the session's meter; settling here would race
     // its own completion and rescale the graph twice.
     if (compacting.has(sessionID)) return
-    const total = exact.get(sessionID)
+    const usage = exact.get(sessionID)
     exact.delete(sessionID)
-    emit({ kind: "done", sessionID, at: Date.now(), exactTokens: total && total > 0 ? total : undefined })
+    emit(settleWith(sessionID, usage))
   }
 
   offs.push(
@@ -108,8 +134,14 @@ export function wireV2(ctx: Context, controller: MeterController, onChange: () =
 
   const finishCompaction = (sessionID: string, tokens: StepTokens | undefined) => {
     compacting.delete(sessionID)
-    const total = tokens ? tokens.output + tokens.reasoning : undefined
-    emit({ kind: "done", sessionID, at: Date.now(), exactTokens: total && total > 0 ? total : undefined })
+    emit(
+      settleWith(
+        sessionID,
+        tokens
+          ? { output: tokens.output + tokens.reasoning, input: tokens.input, cacheRead: tokens.cache.read, cacheWrite: tokens.cache.write }
+          : undefined,
+      ),
+    )
   }
   offs.push(ctx.data.on("session.compaction.ended", (event) => finishCompaction(event.data.sessionID, event.data.tokens)))
   offs.push(ctx.data.on("session.compaction.failed", (event) => finishCompaction(event.data.sessionID, event.data.tokens)))

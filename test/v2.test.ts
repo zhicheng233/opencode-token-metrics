@@ -58,6 +58,23 @@ const stepEnded = (sessionID: string, output: number, reasoning: number) => ({
   },
 })
 
+const stepEndedWithCache = (
+  sessionID: string,
+  output: number,
+  reasoning: number,
+  input: number,
+  read: number,
+  write: number,
+) => ({
+  data: {
+    sessionID,
+    assistantMessageID: "m1",
+    finish: "tool-calls",
+    cost: 0,
+    tokens: { input, output, reasoning, cache: { read, write } },
+  },
+})
+
 const executionSucceeded = (sessionID: string) => ({ data: { sessionID } })
 
 const compactionStarted = (sessionID: string, inputID = "m0") => ({
@@ -151,6 +168,46 @@ describe("wireV2", () => {
     const snapshot = controller.store.snapshot("s1", Date.now(), 4)
     assert.equal(snapshot?.settled, true)
     assert.equal(snapshot?.tokens, 2)
+  })
+
+  it("sums cache usage across steps and reports the hit rate", () => {
+    const h = harness()
+    const controller = createMeterController(CONFIG)
+    wireV2(h.ctx, controller, () => {})
+    h.emit("session.text.delta", textDelta("s1", "abcdefgh"))
+    // Step 1: 1000 read, 200 written, 0 new-in; step 2: 300 read, 0 written, 0 new-in.
+    // Prompt total = 1500, of which 1300 came from cache => 87% (rounded).
+    h.emit("session.step.ended", stepEndedWithCache("s1", 10, 0, 0, 1000, 200))
+    h.emit("session.step.ended", stepEndedWithCache("s1", 10, 0, 0, 300, 0))
+    h.emit("session.execution.succeeded", executionSucceeded("s1"))
+    const cache = controller.store.snapshot("s1", Date.now(), 4)?.cache
+    assert.ok(cache !== undefined)
+    assert.equal(cache?.read, 1300)
+    assert.equal(cache?.write, 200)
+    assert.equal(cache?.hit, 1300 / 1500)
+  })
+
+  it("leaves the cache figure unset when the provider reported none", () => {
+    const h = harness()
+    const controller = createMeterController(CONFIG)
+    wireV2(h.ctx, controller, () => {})
+    h.emit("session.text.delta", textDelta("s1", "abcdefgh"))
+    h.emit("session.step.ended", stepEnded("s1", 100, 20))
+    h.emit("session.execution.succeeded", executionSucceeded("s1"))
+    assert.equal(controller.store.snapshot("s1", Date.now(), 4)?.cache, undefined)
+  })
+
+  it("reports cache usage for a compaction", () => {
+    const h = harness()
+    const controller = createMeterController(CONFIG)
+    wireV2(h.ctx, controller, () => {})
+    h.emit("session.compaction.started", compactionStarted("s1"))
+    h.emit("session.compaction.delta", compactionDelta("s1", "abcdefgh"))
+    h.emit("session.compaction.ended", { data: { sessionID: "s1", reason: "auto", text: "summary", recent: "…", tokens: { input: 0, output: 400, reasoning: 50, cache: { read: 900, write: 100 } } } })
+    const cache = controller.store.snapshot("s1", Date.now(), 4)?.cache
+    assert.ok(cache !== undefined)
+    assert.equal(cache?.read, 900)
+    assert.equal(cache?.hit, 0.9)
   })
 
   it("forgets a session when it is deleted", () => {

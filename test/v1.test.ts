@@ -42,7 +42,34 @@ const created = (sessionID: string, created: number) => ({
 const completed = (sessionID: string, output: number, reasoning: number) => ({
   properties: {
     sessionID,
+    info: {
+      id: "m1",
+      role: "assistant",
+      sessionID,
+      time: { created: 0, completed: 1 },
+      tokens: { input: 0, output, reasoning, cache: { read: 0, write: 0 } },
+    },
+  },
+})
+
+/** A report from a provider that does not expose prompt-cache fields. */
+const completedWithoutCache = (sessionID: string, output: number, reasoning: number) => ({
+  properties: {
+    sessionID,
     info: { id: "m1", role: "assistant", sessionID, time: { created: 0, completed: 1 }, tokens: { output, reasoning } },
+  },
+})
+
+const completedWithCache = (sessionID: string, input: number, read: number, write: number) => ({
+  properties: {
+    sessionID,
+    info: {
+      id: "m1",
+      role: "assistant",
+      sessionID,
+      time: { created: 0, completed: 1 },
+      tokens: { input, output: 10, reasoning: 0, cache: { read, write } },
+    },
   },
 })
 
@@ -106,6 +133,40 @@ describe("wireV1", () => {
     assert.equal(snapshot?.settled, true)
     assert.equal(snapshot?.tokens, 128)
     assert.ok(updates >= 2)
+  })
+
+  it("reports the cache hit rate when the provider supplies it", () => {
+    const h = harness()
+    const controller = createMeterController(CONFIG)
+    wireV1(h.api, controller, () => {})
+    h.emit("message.part.delta", delta("s1", "text", "abcdefgh"))
+    // 700 read from cache out of 100 + 700 + 200 prompt tokens = 70%.
+    h.emit("message.updated", completedWithCache("s1", 100, 700, 200))
+    const cache = controller.store.snapshot("s1", Date.now(), 4)?.cache
+    assert.ok(cache !== undefined)
+    assert.equal(cache?.hit, 0.7)
+    assert.equal(cache?.read, 700)
+  })
+
+  it("leaves the cache figure unset when no prompt tokens were reported", () => {
+    const h = harness()
+    const controller = createMeterController(CONFIG)
+    wireV1(h.api, controller, () => {})
+    h.emit("message.part.delta", delta("s1", "text", "abcdefgh"))
+    h.emit("message.updated", completedWithCache("s1", 0, 0, 0))
+    assert.equal(controller.store.snapshot("s1", Date.now(), 4)?.cache, undefined)
+  })
+
+  it("survives a completion that omits the cache fields entirely", () => {
+    const h = harness()
+    const controller = createMeterController(CONFIG)
+    wireV1(h.api, controller, () => {})
+    h.emit("message.part.delta", delta("s1", "text", "abcdefgh"))
+    h.emit("message.updated", completedWithoutCache("s1", 120, 8))
+    const snapshot = controller.store.snapshot("s1", Date.now(), 4)
+    assert.equal(snapshot?.settled, true)
+    assert.equal(snapshot?.tokens, 128)
+    assert.equal(snapshot?.cache, undefined)
   })
 
   it("starts a turn on assistant message creation to measure TTFT", () => {

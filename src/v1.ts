@@ -4,7 +4,8 @@
  * measurement core stays free of version-specific imports.
  */
 import type { TuiPluginApi } from "@opencode-ai/plugin/tui"
-import type { MeterController } from "./controller.ts"
+import type { MeterController, MeterEvent } from "./controller.ts"
+import { cacheHitRate } from "./meter.ts"
 
 /** Delta fields that represent generated output. Everything else is ignored. */
 const COUNTED_FIELDS = new Set(["text", "reasoning"])
@@ -29,8 +30,17 @@ export function wireV1(api: V1MeterApi, controller: MeterController, onChange: (
     const info = event.properties.info
     if (info.role !== "assistant") return
     if (info.time.completed) {
-      const exact = info.tokens.output + info.tokens.reasoning
-      if (controller.handle({ kind: "done", sessionID: info.sessionID, at: Date.now(), exactTokens: exact })) onChange()
+      // Cache fields are provider-dependent: an older or partial report may
+      // omit `input` or `cache` entirely, so read them defensively.
+      const { output, reasoning, input, cache } = info.tokens
+      const done: MeterEvent = {
+        kind: "done",
+        sessionID: info.sessionID,
+        at: Date.now(),
+        exactTokens: output + reasoning,
+        cache: cacheHitRate(input ?? 0, cache?.read ?? 0, cache?.write ?? 0),
+      }
+      if (controller.handle(done)) onChange()
       return
     }
     if (controller.handle({ kind: "turn", sessionID: info.sessionID, messageID: info.id, at: info.time.created })) {
