@@ -50,9 +50,10 @@ Add it to the `plugins` array in your OpenCode config
 }
 ```
 
-V2 options use the object form:
+To pass options, put the plugin in **`cli.json`** instead, using the object form:
 
 ```jsonc
+// ~/.config/opencode/cli.json
 {
   "plugins": [
     { "package": "opencode-token-metrics", "options": { "vuColumns": 20, "vuScale": "fixed", "vuFullTps": 80 } }
@@ -60,7 +61,12 @@ V2 options use the object form:
 }
 ```
 
-The meter renders into the prompt footer status slot. Restart the TUI afterwards — plugins load at startup and are not hot-reloaded.
+`cli.json` is the CLI-side config, so options there reach the TUI plugin's
+`ctx.options`. Options written in `opencode.json` are delivered to **server**
+plugins and do not reach the TUI. Keep an entry in only one of the two files to
+avoid loading the plugin twice.
+
+The meter renders into the prompt footer status slot. Restart the TUI afterwards — watched config directories reload automatically, but changes to the plugin source itself may not take effect until a restart.
 
 ### V1 (1.x)
 
@@ -107,8 +113,11 @@ V2:
 1. Add "opencode-token-metrics" to the "plugins" array in the user's OpenCode
    config (opencode.json or opencode.jsonc). Do NOT remove sibling entries.
    Do NOT add a version suffix.
-2. Options use the object form:
+2. Options only reach the TUI plugin when the entry lives in cli.json
+   (~/.config/opencode/cli.json) instead, in the object form:
    { "package": "opencode-token-metrics", "options": { "alwaysShow": true } }.
+   Options in opencode.json go to server plugins and are ignored by the TUI.
+   Do not list the plugin in both files.
 
 V1:
 1. Run: opencode plugin opencode-token-metrics -g
@@ -120,19 +129,20 @@ V1:
 
 Both:
 - Do not touch any other top-level key in the config.
-- Tell the user to restart the TUI. Plugins load at startup; there is no hot reload.
+- Tell the user to restart the TUI so the new plugin is loaded.
 ```
 
 ## Options
 
 V1 passes options as the second element of the plugin tuple; V2 uses
-`{ "package": "opencode-token-metrics", "options": { ... } }`. The keys are the same either way:
+`{ "package": "opencode-token-metrics", "options": { ... } }` in `cli.json`.
+The keys are the same either way:
 
 ```jsonc
 // V1 (tui.json)
 { "plugin": [["opencode-token-metrics", { "vuColumns": 20, "showTtft": false }]] }
 
-// V2 (opencode.jsonc)
+// V2 (~/.config/opencode/cli.json)
 { "plugins": [{ "package": "opencode-token-metrics", "options": { "vuColumns": 20, "showTtft": false } }] }
 ```
 
@@ -178,6 +188,7 @@ generation's event bus into the same normalized events.
 - `session.tool.called` — restarts the live rate when a tool runs, keeping the graph continuous across the gap.
 - `session.step.ended` / `session.step.failed` — accumulate the provider's exact token usage per step.
 - `session.execution.succeeded` / `.failed` / `.interrupted` — finish the turn with the summed tokens and freeze the final frame.
+- `session.compaction.started` / `.delta` / `.ended` / `.failed` — compaction is billed as a generation of its own: it opens a turn, streams its summary, and settles with its own reported tokens.
 - `session.deleted` — frees that session's meter.
 
 The live rate is `tokens in window / elapsed span` over the trailing window, measured on the wall clock. The average is `turn tokens / active generation time` — the time spent streaming, excluding tool pauses. Peak is the highest one-second rate seen during the turn (never below the average); trend compares the last two complete seconds. VU columns auto-scale to the largest bucket in view, scaled to the provider's exact token total when the turn completes.
