@@ -10,6 +10,10 @@
  *   session.tool.called         -> segment (tool pause; the graph stays continuous)
  *   session.step.ended/failed   ->         (accumulate exact provider tokens)
  *   session.execution.*         -> done    (finish the turn with the summed tokens)
+ *   session.compaction.started  -> turn    (compaction is its own generation)
+ *   session.compaction.delta    -> delta   (streamed summary)
+ *   session.compaction.ended    -> done    (finish with the reported tokens)
+ *   session.compaction.failed   -> done    (finish on the estimate)
  *   session.deleted             -> drop    (forget the session)
  */
 import type { Context } from "@opencode/plugin/tui/context"
@@ -24,6 +28,7 @@ type StepTokens = { readonly output: number; readonly reasoning: number }
  */
 export function wireV2(ctx: Context, controller: MeterController, onChange: () => void): () => void {
   const exact = new Map<string, number>()
+  const compacting = new Set<string>()
   const offs: Array<() => void> = []
 
   const emit = (event: MeterEvent) => {
@@ -38,6 +43,9 @@ export function wireV2(ctx: Context, controller: MeterController, onChange: () =
   }
 
   const finish = (sessionID: string) => {
+    // A compaction in flight owns the session's meter; settling here would race
+    // its own completion and rescale the graph twice.
+    if (compacting.has(sessionID)) return
     const total = exact.get(sessionID)
     exact.delete(sessionID)
     emit({ kind: "done", sessionID, at: Date.now(), exactTokens: total && total > 0 ? total : undefined })
@@ -71,13 +79,45 @@ export function wireV2(ctx: Context, controller: MeterController, onChange: () =
   offs.push(ctx.data.on("session.step.ended", (event) => addUsage(event.data.sessionID, event.data.tokens)))
   offs.push(ctx.data.on("session.step.failed", (event) => addUsage(event.data.sessionID, event.data.tokens)))
 
-  offs.push(ctx.data.on("session.execution.succeeded", (event) => finish(event.data.sessionID)))
+  offs.push(
+    ctx.data.on("session.execution.succeeded", (event) => finish(event.data.sessionID)),
+  )
   offs.push(ctx.data.on("session.execution.failed", (event) => finish(event.data.sessionID)))
   offs.push(ctx.data.on("session.execution.interrupted", (event) => finish(event.data.sessionID)))
+
+  // Compaction is a generation of its own: it streams a summary and reports its
+  // own token usage, but never emits the step/execution events above.
+  offs.push(
+    ctx.data.on("session.compaction.started", (event) => {
+      compacting.add(event.data.sessionID)
+      emit({
+        kind: "turn",
+        sessionID: event.data.sessionID,
+        // The event carries no timestamp, so the arrival time starts the TTFT window.
+        messageID: event.data.inputID ?? `compaction:${event.data.sessionID}`,
+        at: Date.now(),
+      })
+    }),
+  )
+
+  const onCompactionDelta = (sessionID: string, text: string) => {
+    if (!text) return
+    emit({ kind: "delta", sessionID, text, at: Date.now() })
+  }
+  offs.push(ctx.data.on("session.compaction.delta", (event) => onCompactionDelta(event.data.sessionID, event.data.text)))
+
+  const finishCompaction = (sessionID: string, tokens: StepTokens | undefined) => {
+    compacting.delete(sessionID)
+    const total = tokens ? tokens.output + tokens.reasoning : undefined
+    emit({ kind: "done", sessionID, at: Date.now(), exactTokens: total && total > 0 ? total : undefined })
+  }
+  offs.push(ctx.data.on("session.compaction.ended", (event) => finishCompaction(event.data.sessionID, event.data.tokens)))
+  offs.push(ctx.data.on("session.compaction.failed", (event) => finishCompaction(event.data.sessionID, event.data.tokens)))
 
   offs.push(
     ctx.data.on("session.deleted", (event) => {
       exact.delete(event.data.sessionID)
+      compacting.delete(event.data.sessionID)
       emit({ kind: "drop", sessionID: event.data.sessionID })
     }),
   )

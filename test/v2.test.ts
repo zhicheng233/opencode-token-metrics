@@ -60,6 +60,16 @@ const stepEnded = (sessionID: string, output: number, reasoning: number) => ({
 
 const executionSucceeded = (sessionID: string) => ({ data: { sessionID } })
 
+const compactionStarted = (sessionID: string, inputID = "m0") => ({
+  data: { sessionID, reason: "auto", recent: "…", inputID },
+})
+
+const compactionDelta = (sessionID: string, text: string) => ({ data: { sessionID, text } })
+
+const compactionEnded = (sessionID: string, output: number, reasoning: number) => ({
+  data: { sessionID, reason: "auto", text: "summary", recent: "…", tokens: { input: 0, output, reasoning, cache: { read: 0, write: 0 } } },
+})
+
 const CONFIG = { rollingWindowMs: 5000, idleTimeoutMs: 1500, minSpanMs: 300 }
 
 describe("wireV2", () => {
@@ -154,11 +164,78 @@ describe("wireV2", () => {
     assert.equal(controller.store.snapshot("s1", Date.now(), 4), undefined)
   })
 
+  it("counts compaction as its own generation", () => {
+    const h = harness()
+    let updates = 0
+    const controller = createMeterController(CONFIG)
+    wireV2(h.ctx, controller, () => {
+      updates += 1
+    })
+
+    h.emit("session.compaction.started", compactionStarted("s1"))
+    h.emit("session.compaction.delta", compactionDelta("s1", "abcdefgh"))
+    assert.equal(controller.store.snapshot("s1", Date.now(), 4)?.tokens, 2)
+
+    h.emit("session.compaction.ended", compactionEnded("s1", 400, 50))
+    const snapshot = controller.store.snapshot("s1", Date.now(), 4)
+    assert.equal(snapshot?.settled, true)
+    assert.equal(snapshot?.tokens, 450)
+    assert.ok(updates >= 3)
+  })
+
+  it("measures compaction TTFT from the event arrival", () => {
+    const h = harness()
+    const controller = createMeterController(CONFIG)
+    wireV2(h.ctx, controller, () => {})
+    h.emit("session.compaction.started", compactionStarted("s1"))
+    h.emit("session.compaction.delta", compactionDelta("s1", "abcdefgh"))
+    const ttft = controller.store.snapshot("s1", Date.now(), 4)?.ttftMs
+    assert.ok(ttft !== undefined)
+    assert.ok((ttft ?? 0) >= 0)
+  })
+
+  it("settles a failed compaction on the estimate", () => {
+    const h = harness()
+    const controller = createMeterController(CONFIG)
+    wireV2(h.ctx, controller, () => {})
+    h.emit("session.compaction.started", compactionStarted("s1"))
+    h.emit("session.compaction.delta", compactionDelta("s1", "abcdefgh"))
+    h.emit("session.compaction.failed", { data: { sessionID: "s1", reason: "auto", error: { type: "e", message: "m" } } })
+    const snapshot = controller.store.snapshot("s1", Date.now(), 4)
+    assert.equal(snapshot?.settled, true)
+    assert.equal(snapshot?.tokens, 2)
+  })
+
+  it("lets an execution settle once its compaction has finished", () => {
+    const h = harness()
+    const controller = createMeterController(CONFIG)
+    wireV2(h.ctx, controller, () => {})
+    h.emit("session.compaction.started", compactionStarted("s1"))
+    h.emit("session.compaction.ended", compactionEnded("s1", 400, 50))
+    h.emit("session.text.delta", textDelta("s1", "abcdefgh"))
+    h.emit("session.step.ended", stepEnded("s1", 100, 20))
+    h.emit("session.execution.succeeded", executionSucceeded("s1"))
+    assert.equal(controller.store.snapshot("s1", Date.now(), 4)?.tokens, 120)
+  })
+
+  it("ignores an execution that lands mid-compaction", () => {
+    const h = harness()
+    const controller = createMeterController(CONFIG)
+    wireV2(h.ctx, controller, () => {})
+    h.emit("session.compaction.started", compactionStarted("s1"))
+    h.emit("session.compaction.delta", compactionDelta("s1", "abcdefgh"))
+    h.emit("session.execution.succeeded", executionSucceeded("s1"))
+    assert.equal(controller.store.snapshot("s1", Date.now(), 4)?.settled, false)
+
+    h.emit("session.compaction.ended", compactionEnded("s1", 400, 50))
+    assert.equal(controller.store.snapshot("s1", Date.now(), 4)?.tokens, 450)
+  })
+
   it("unsubscribes on dispose", () => {
     const h = harness()
     const controller = createMeterController(CONFIG)
     const dispose = wireV2(h.ctx, controller, () => {})
-    assert.equal(h.handlers.size, 10)
+    assert.equal(h.handlers.size, 14)
     dispose()
     assert.equal(h.handlers.size, 0)
   })
