@@ -4,6 +4,8 @@ import {
   MeterStore,
   TpsMeter,
   approxTokens,
+  cacheHitRate,
+  formatCache,
   formatClock,
   formatCount,
   formatLine,
@@ -95,6 +97,23 @@ describe("formatters", () => {
     assert.equal(formatClock(-100), "0.0s")
   })
 
+  it("cacheHitRate weighs reads against the whole prompt", () => {
+    const stats = cacheHitRate(100, 700, 200)
+    assert.equal(stats?.hit, 0.7)
+    assert.equal(formatCache(stats), "70%")
+  })
+
+  it("cacheHitRate is undefined when no prompt tokens were reported", () => {
+    assert.equal(cacheHitRate(0, 0, 0), undefined)
+    assert.equal(formatCache(undefined), "-")
+  })
+
+  it("cacheHitRate counts a fully cache-served prompt as 100%", () => {
+    const stats = cacheHitRate(0, 500, 0)
+    assert.equal(stats?.hit, 1)
+    assert.equal(formatCache(stats), "100%")
+  })
+
   it("rateTier boundaries", () => {
     assert.equal(rateTier(-1, 10, 30), "idle")
     assert.equal(rateTier(9.99, 10, 30), "slow")
@@ -118,6 +137,7 @@ describe("formatLine", () => {
     trend: "up",
     trendPct: 18,
     ttftMs: 800,
+    cache: undefined,
     vu: [10, 20, 30, 40],
   }
   const options: DisplayOptions = {
@@ -130,6 +150,7 @@ describe("formatLine", () => {
     showAvg: true,
     showPeak: true,
     showTtft: true,
+    showCache: true,
     showTokenCount: false,
     showElapsed: false,
   }
@@ -166,6 +187,19 @@ describe("formatLine", () => {
     const line = formatLine({ ...base, ttftMs: undefined }, options)
     assert.ok(line.endsWith("· avg 38.2 · pk 61.0"))
   })
+
+  it("appends the cache hit rate after ttft", () => {
+    const cache = cacheHitRate(100, 700, 200)
+    assert.ok(cache !== undefined)
+    const line = formatLine({ ...base, cache }, options)
+    assert.equal(line, "tok/s ▁▃▄▆ 42.5 ▲18% · avg 38.2 · pk 61.0 · ttft 0.8s · cache 70%")
+  })
+
+  it("omits the cache segment when showCache is false", () => {
+    const cache = cacheHitRate(100, 700, 200)
+    const line = formatLine({ ...base, cache }, { ...options, showCache: false })
+    assert.equal(line, "tok/s ▁▃▄▆ 42.5 ▲18% · avg 38.2 · pk 61.0 · ttft 0.8s")
+  })
 })
 
 describe("hasData", () => {
@@ -181,6 +215,7 @@ describe("hasData", () => {
     trend: "none",
     trendPct: 0,
     ttftMs: undefined,
+    cache: undefined,
     vu: [],
   }
 
@@ -286,6 +321,42 @@ describe("TpsMeter", () => {
     const snap = meter.snapshot(1000)
     assert.equal(snap.settled, true)
     assert.equal(snap.rate, 0)
+  })
+
+  it("carries cache usage through settle into the frozen frame", () => {
+    const meter = new TpsMeter(CONFIG, () => 0, 0)
+    meter.record("a".repeat(400), 900)
+    const cache = cacheHitRate(100, 700, 200)
+    meter.settle(1000, 123, cache)
+    assert.equal(meter.snapshot(1200).cache?.hit, 0.7)
+    // The frozen frame is what the view reads, so it must hold the same figure.
+    assert.equal(meter.snapshot(9999).cache?.hit, 0.7)
+  })
+
+  it("leaves the cache figure unset until a settle carries one", () => {
+    const meter = new TpsMeter(CONFIG, () => 0, 0)
+    meter.record("a".repeat(400), 900)
+    assert.equal(meter.snapshot(950).cache, undefined)
+    meter.settle(1000, 123)
+    assert.equal(meter.snapshot(1200).cache, undefined)
+  })
+
+  it("keeps the previous cache figure when a later settle omits one", () => {
+    const meter = new TpsMeter(CONFIG, () => 0, 0)
+    meter.record("a".repeat(400), 900)
+    meter.settle(1000, 123, cacheHitRate(100, 700, 200))
+    meter.record("b".repeat(400), 1100)
+    meter.settle(1200, 50)
+    assert.equal(meter.snapshot(1300).cache?.hit, 0.7)
+  })
+
+  it("drops the cache figure when a new turn starts generating", () => {
+    const meter = new TpsMeter(CONFIG, () => 0, 0)
+    meter.record("a".repeat(400), 900)
+    meter.settle(1000, 123, cacheHitRate(100, 700, 200))
+    meter.beginTurn("m2", 2000)
+    meter.record("c".repeat(400), 2100)
+    assert.equal(meter.snapshot(2200).cache, undefined)
   })
 
   it("resumes live tracking after a settle", () => {

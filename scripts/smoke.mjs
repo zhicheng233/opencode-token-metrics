@@ -13,13 +13,17 @@ import { execFileSync } from "node:child_process"
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { pathToFileURL } from "node:url"
 
 const REQUIRED_FILES = [
   "package.json",
   "README.md",
   "LICENSE",
-  "src/index.tsx",
+  "src/tui.tsx",
+  "src/server.ts",
   "src/controller.ts",
+  "src/v1.ts",
+  "src/v2.ts",
   "src/meter.ts",
 ]
 
@@ -30,8 +34,16 @@ function fail(message) {
 
 const temp = mkdtempSync(join(tmpdir(), "opencode-token-metrics-smoke-"))
 
+// Run npm through its JS entrypoint when available: on Windows `npm` is
+// `npm.cmd`, which cannot be spawned directly (and would need an unsafe shell).
+const npmCli = process.env.npm_execpath
+const runNpm = (args, options) =>
+  npmCli
+    ? execFileSync(process.execPath, [npmCli, ...args], options)
+    : execFileSync("npm", args, options)
+
 try {
-  const raw = execFileSync("npm", ["pack", "--json", "--pack-destination", temp], {
+  const raw = runNpm(["pack", "--json", "--pack-destination", temp], {
     cwd: process.cwd(),
     encoding: "utf8",
   })
@@ -54,7 +66,8 @@ try {
     fail('package.json "oc-plugin" must include "tui"')
   }
 
-  const meter = await import(join(extracted, "src", "meter.ts"))
+  // `import()` needs a file URL; a bare Windows path is not a valid specifier.
+  const meter = await import(pathToFileURL(join(extracted, "src", "meter.ts")).href)
   if (typeof meter.formatLine !== "function" || typeof meter.TpsMeter !== "function") {
     fail("packed src/meter.ts did not export the expected API")
   }
@@ -62,14 +75,14 @@ try {
   const esbuild = await import("esbuild")
   try {
     await esbuild.build({
-      entryPoints: [join(extracted, "src", "index.tsx")],
+      entryPoints: [join(extracted, "src", "tui.tsx")],
       bundle: true,
       write: false,
       format: "esm",
       platform: "node",
       jsx: "automatic",
       jsxImportSource: "@opentui/solid",
-      external: ["@opencode-ai/*", "@opentui/*", "solid-js"],
+      external: ["@opencode-ai/*", "@opencode/*", "@opentui/*", "solid-js"],
     })
   } catch (error) {
     fail(`entry failed to bundle: ${error instanceof Error ? error.message : String(error)}`)

@@ -23,6 +23,19 @@ export type RateConfig = {
 /** Direction of the rate over the last two complete seconds. */
 export type Trend = "up" | "down" | "flat" | "none"
 
+/**
+ * Provider-reported prompt-cache usage for one settled turn.
+ *
+ * `hit` is the share of the prompt served from cache; `read`/`write` are the
+ * raw token counts behind it, kept so a view can show the detail if it wants.
+ */
+export type CacheStats = {
+  hit: number
+  read: number
+  write: number
+  input: number
+}
+
 /** How VU columns map to height. */
 export type VuScale = "auto" | "fixed"
 
@@ -39,6 +52,7 @@ export type Snapshot = {
   trend: Trend
   trendPct: number
   ttftMs: number | undefined
+  cache: CacheStats | undefined
   vu: number[]
 }
 
@@ -106,6 +120,23 @@ export function formatClock(ms: number): string {
 }
 
 /**
+ * Cache share of a prompt. `cache.read / (input + read + write)`, i.e. the
+ * fraction of prompt tokens the provider served from cache rather than
+ * re-reading. Returns undefined when the provider reported no prompt tokens.
+ */
+export function cacheHitRate(input: number, read: number, write: number): CacheStats | undefined {
+  const total = input + read + write
+  if (total <= 0) return undefined
+  return { hit: read / total, read, write, input }
+}
+
+/** `87%` with no decimals; `-` when there is no cache data. */
+export function formatCache(stats: CacheStats | undefined): string {
+  if (!stats) return "-"
+  return `${Math.round(stats.hit * 100)}%`
+}
+
+/**
  * Denominator for VU heights.
  *
  * `auto` uses the turn peak so the scale is stable for the whole turn: a column
@@ -159,6 +190,7 @@ export type DisplayOptions = {
   showAvg: boolean
   showPeak: boolean
   showTtft: boolean
+  showCache: boolean
   showTokenCount: boolean
   showElapsed: boolean
 }
@@ -194,6 +226,7 @@ export function formatLine(snapshot: Snapshot, options: DisplayOptions): string 
   if (options.showAvg) tail.push(`avg ${formatRate(snapshot.avg)}`)
   if (options.showPeak) tail.push(`pk ${formatRate(snapshot.peak)}`)
   if (options.showTtft && snapshot.ttftMs !== undefined) tail.push(`ttft ${formatClock(snapshot.ttftMs)}`)
+  if (options.showCache && snapshot.cache) tail.push(`cache ${formatCache(snapshot.cache)}`)
   if (options.showTokenCount) tail.push(`${formatCount(snapshot.tokens)} tok`)
   if (options.showElapsed) tail.push(formatClock(snapshot.elapsed))
 
@@ -226,6 +259,7 @@ export class TpsMeter {
   private graphStartAt: number | undefined
   private turnStarted = false
   private frozen: Snapshot | undefined
+  private cache: CacheStats | undefined
 
   constructor(config: RateConfig, clock: () => number = Date.now, startedAt: number = clock()) {
     this.config = config
@@ -268,6 +302,7 @@ export class TpsMeter {
     this.lastTokenAt = undefined
     this.graphStartAt = undefined
     this.frozen = undefined
+    this.cache = undefined
     this.turnStarted = true
   }
 
@@ -323,12 +358,15 @@ export class TpsMeter {
   }
 
   /** Close the turn, prefer exact provider tokens, and freeze the final frame. */
-  settle(at: number = this.clock(), exactTokens?: number): void {
+  settle(at: number = this.clock(), exactTokens?: number, cache?: CacheStats): void {
     // Capture the estimate before replacing it: the per-second bars are built
     // from estimated tokens, so they need the same ratio applied to match the
     // provider's exact total.
     const estimate = this.tokens
     if (exactTokens !== undefined && exactTokens > 0) this.tokens = exactTokens
+    // Cache usage only arrives with the provider's final report, so keep the
+    // previous turn's figure when a settle carries none (e.g. an interruption).
+    if (cache) this.cache = cache
     const measured = measureRate(this.samples, at, this.config)
     // With no fresh samples (e.g. the turn ended right after a tool call), fall
     // back to the average instead of freezing a misleading 0.
@@ -440,6 +478,7 @@ export class TpsMeter {
       trend,
       trendPct,
       ttftMs,
+      cache: this.cache,
       vu,
     }
   }
@@ -475,10 +514,10 @@ export class MeterStore {
     return true
   }
 
-  settle(sessionID: string, exactTokens?: number, at?: number): boolean {
+  settle(sessionID: string, exactTokens?: number, at?: number, cache?: CacheStats): boolean {
     const meter = this.meters.get(sessionID)
     if (!meter) return false
-    meter.settle(at, exactTokens)
+    meter.settle(at, exactTokens, cache)
     return true
   }
 
