@@ -146,6 +146,42 @@ describe("wireV2", () => {
     assert.ok(updates >= 2)
   })
 
+  it("keeps one graph when a tool loop starts a new assistant message", () => {
+    const h = harness()
+    const controller = createMeterController(CONFIG)
+    wireV2(h.ctx, controller, () => {})
+    const started = Date.now() - 1000
+    h.emit("session.step.started", stepStarted("s1", "m1", started))
+    h.emit("session.text.delta", textDelta("s1", "abcdefgh", "m1"))
+    h.emit("session.tool.called", toolCalled("s1"))
+    h.emit("session.step.started", stepStarted("s1", "m2", Date.now()))
+    h.emit("session.text.delta", textDelta("s1", "abcdefgh", "m2"))
+
+    const live = controller.store.snapshot("s1", Date.now(), 4)
+    assert.equal(live?.tokens, 4)
+    assert.ok((live?.ttftMs ?? 0) >= 500)
+
+    h.emit("session.step.ended", stepEnded("s1", 100, 0))
+    h.emit("session.step.ended", stepEnded("s1", 50, 0))
+    h.emit("session.execution.succeeded", executionSucceeded("s1"))
+    assert.equal(controller.store.snapshot("s1", Date.now(), 4)?.tokens, 150)
+  })
+
+  it("opens a fresh turn after the previous execution settles", () => {
+    const h = harness()
+    const controller = createMeterController(CONFIG)
+    wireV2(h.ctx, controller, () => {})
+    h.emit("session.step.started", stepStarted("s1", "m1", Date.now() - 1000))
+    h.emit("session.text.delta", textDelta("s1", "abcdefgh"))
+    h.emit("session.execution.succeeded", executionSucceeded("s1"))
+
+    h.emit("session.step.started", stepStarted("s1", "m2", Date.now()))
+    h.emit("session.text.delta", textDelta("s1", "abcd", "m2"))
+    const snapshot = controller.store.snapshot("s1", Date.now(), 4)
+    assert.equal(snapshot?.settled, false)
+    assert.equal(snapshot?.tokens, 1)
+  })
+
   it("settles with the summed step tokens when the execution ends", () => {
     const h = harness()
     const controller = createMeterController(CONFIG)
@@ -273,6 +309,26 @@ describe("wireV2", () => {
     h.emit("session.step.ended", stepEnded("s1", 100, 20))
     h.emit("session.execution.succeeded", executionSucceeded("s1"))
     assert.equal(controller.store.snapshot("s1", Date.now(), 4)?.tokens, 120)
+  })
+
+  it("does not carry a compacted execution's tokens into the next settle", () => {
+    const h = harness()
+    const controller = createMeterController(CONFIG)
+    wireV2(h.ctx, controller, () => {})
+    h.emit("session.step.started", stepStarted("s1", "m1", Date.now() - 1000))
+    h.emit("session.text.delta", textDelta("s1", "abcdefgh"))
+    h.emit("session.step.ended", stepEnded("s1", 100, 20))
+    h.emit("session.compaction.started", compactionStarted("s1"))
+    h.emit("session.compaction.delta", compactionDelta("s1", "abcdefgh"))
+    h.emit("session.execution.succeeded", executionSucceeded("s1"))
+    h.emit("session.compaction.ended", compactionEnded("s1", 400, 50))
+    assert.equal(controller.store.snapshot("s1", Date.now(), 4)?.tokens, 450)
+
+    h.emit("session.step.started", stepStarted("s1", "m2", Date.now()))
+    h.emit("session.text.delta", textDelta("s1", "abcdefgh", "m2"))
+    h.emit("session.step.ended", stepEnded("s1", 10, 0))
+    h.emit("session.execution.succeeded", executionSucceeded("s1"))
+    assert.equal(controller.store.snapshot("s1", Date.now(), 4)?.tokens, 10)
   })
 
   it("ignores an execution that lands mid-compaction", () => {

@@ -186,7 +186,7 @@ generation's event bus into the same normalized events.
 
 **OpenCode V2** (`src/v2.ts`, installed via `plugins`, renders in `prompt.footer.status`):
 
-- `session.step.started` — opens the assistant turn and records its start time (for TTFT).
+- `session.step.started` — the first step of an execution opens the assistant turn and records its start time (for TTFT). Later steps in the same tool loop keep that graph.
 - `session.text.delta` / `session.reasoning.delta` — record streamed output and bucket it per second.
 - `session.tool.called` — restarts the live rate when a tool runs, keeping the graph continuous across the gap.
 - `session.step.ended` / `session.step.failed` — accumulate the provider's exact token usage per step, including prompt-cache reads and writes.

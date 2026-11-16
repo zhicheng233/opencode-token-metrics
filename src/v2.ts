@@ -5,7 +5,7 @@
  *
  * Mapping (V2 has no single "message completed" event, so a turn is bracketed
  * by the step/execution lifecycle):
- *   session.step.started        -> turn    (opens the assistant turn, incl. TTFT start)
+ *   session.step.started        -> turn    (first step of an execution only; later steps keep the graph)
  *   session.text/reasoning.delta-> delta   (streamed output)
  *   session.tool.called         -> segment (tool pause; the graph stays continuous)
  *   session.step.ended/failed   ->         (accumulate exact provider tokens)
@@ -38,6 +38,9 @@ type Usage = { output: number; input: number; cacheRead: number; cacheWrite: num
 export function wireV2(ctx: Context, controller: MeterController, onChange: () => void): () => void {
   const exact = new Map<string, Usage>()
   const compacting = new Set<string>()
+  // Sessions whose current execution already opened a meter turn. A tool loop
+  // emits a new assistant message per step; opening again would wipe the graph.
+  const opened = new Set<string>()
   const offs: Array<() => void> = []
 
   const emit = (event: MeterEvent) => {
@@ -69,9 +72,14 @@ export function wireV2(ctx: Context, controller: MeterController, onChange: () =
   }
 
   const finish = (sessionID: string) => {
-    // A compaction in flight owns the session's meter; settling here would race
-    // its own completion and rescale the graph twice.
-    if (compacting.has(sessionID)) return
+    opened.delete(sessionID)
+    // A compaction in flight owns the session's meter. Settling here would
+    // rescale the graph twice, but this execution's totals must not be added
+    // onto the next turn.
+    if (compacting.has(sessionID)) {
+      exact.delete(sessionID)
+      return
+    }
     const usage = exact.get(sessionID)
     exact.delete(sessionID)
     emit(settleWith(sessionID, usage))
@@ -79,9 +87,12 @@ export function wireV2(ctx: Context, controller: MeterController, onChange: () =
 
   offs.push(
     ctx.data.on("session.step.started", (event) => {
+      const sessionID = event.data.sessionID
+      if (opened.has(sessionID)) return
+      opened.add(sessionID)
       emit({
         kind: "turn",
-        sessionID: event.data.sessionID,
+        sessionID,
         messageID: event.data.assistantMessageID,
         at: event.data.started,
       })
@@ -115,12 +126,15 @@ export function wireV2(ctx: Context, controller: MeterController, onChange: () =
   // own token usage, but never emits the step/execution events above.
   offs.push(
     ctx.data.on("session.compaction.started", (event) => {
-      compacting.add(event.data.sessionID)
+      const sessionID = event.data.sessionID
+      compacting.add(sessionID)
+      opened.delete(sessionID)
+      exact.delete(sessionID)
       emit({
         kind: "turn",
-        sessionID: event.data.sessionID,
+        sessionID,
         // The event carries no timestamp, so the arrival time starts the TTFT window.
-        messageID: event.data.inputID ?? `compaction:${event.data.sessionID}`,
+        messageID: event.data.inputID ?? `compaction:${sessionID}`,
         at: Date.now(),
       })
     }),
@@ -134,6 +148,8 @@ export function wireV2(ctx: Context, controller: MeterController, onChange: () =
 
   const finishCompaction = (sessionID: string, tokens: StepTokens | undefined) => {
     compacting.delete(sessionID)
+    opened.delete(sessionID)
+    exact.delete(sessionID)
     emit(
       settleWith(
         sessionID,
@@ -150,6 +166,7 @@ export function wireV2(ctx: Context, controller: MeterController, onChange: () =
     ctx.data.on("session.deleted", (event) => {
       exact.delete(event.data.sessionID)
       compacting.delete(event.data.sessionID)
+      opened.delete(event.data.sessionID)
       emit({ kind: "drop", sessionID: event.data.sessionID })
     }),
   )
