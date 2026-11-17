@@ -1,6 +1,6 @@
 # opencode-token-metrics
 
-[![npm version](https://img.shields.io/npm/v/opencode-token-metrics)](https://www.npmjs.com/package/opencode-token-metrics)
+[![npm version](https://img.shields.io/npm/v/opencode-token-metrics)](https://www.npmjs.com/package/opencode-token-metrics) · [Site](https://jashjacob.github.io/opencode-token-metrics/)
 
 A live throughput meter for the [OpenCode](https://opencode.ai) TUI, for **V1 and V2**. It renders beside the session prompt as a VU-style time-series of generation speed, with average, peak, trend, and time-to-first-token.
 
